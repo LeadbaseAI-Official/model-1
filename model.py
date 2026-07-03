@@ -127,7 +127,8 @@ def run_model_query(prompt: str, jid: Optional[str] = None, image_base64: Option
                             common_len += 1
                             
                         if common_len > 0:
-                            llm.load_state(state_file.read_bytes())
+                            with open(state_file, "rb") as sf:
+                                llm.load_state(pickle.load(sf))
                             print(f"[Model] Restored cache state for JID: {jid} (prefix matched: {common_len}/{len(cached_tokens)} tokens)", flush=True)
                     except Exception as cache_err:
                         print(f"[Model] Warning: Failed to load cache state for JID {jid}: {cache_err}", flush=True)
@@ -148,7 +149,8 @@ def run_model_query(prompt: str, jid: Optional[str] = None, image_base64: Option
                                 common_len += 1
                                 
                             if common_len > 0:
-                                llm.load_state(global_state.read_bytes())
+                                with open(global_state, "rb") as sf:
+                                    llm.load_state(pickle.load(sf))
                                 print(f"[Model] Restored cache from global prefix cache (prefix matched: {common_len}/{len(cached_tokens)} tokens)", flush=True)
                         except Exception as glob_err:
                             print(f"[Model] Warning: Failed to load global prefix cache: {glob_err}", flush=True)
@@ -176,7 +178,8 @@ def run_model_query(prompt: str, jid: Optional[str] = None, image_base64: Option
                 
                 if jid:
                     try:
-                        state_file.write_bytes(llm.save_state())
+                        with open(state_file, "wb") as sf:
+                            pickle.dump(llm.save_state(), sf)
                         # Tokenize combined prompt and output to align cache end
                         full_evaluated_text = formatted_prompt + text_result
                         full_tokens = llm.tokenize(full_evaluated_text.encode("utf-8"))
