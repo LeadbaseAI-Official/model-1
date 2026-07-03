@@ -220,36 +220,93 @@ def startup_event() -> None:
         kb_path = Path("kb.json")
         
         if system_path.exists() and persona_path.exists() and kb_path.exists():
+            import json
+            import subprocess
+            from chat_template import format_chat_prompt
+            
             system_prompt = system_path.read_text(encoding="utf-8").strip()
-            persona = persona_path.read_text(encoding="utf-8").strip()
+            persona_raw = persona_path.read_text(encoding="utf-8").strip()
             kb = kb_path.read_text(encoding="utf-8").strip()
             
             # Strip tool declarations
             clean_system = re.sub(r"## TOOL USE[\s\S]*?(?=##|$)", "", system_prompt)
             
-            # Format raw prefix
-            prefix_text = (
-                "<start_of_turn>user\nYou are a helpful assistant.\n\n"
-                f"System Prompt:\n{clean_system}\n\n"
-                f"Persona:\n{persona}\n\n"
-                f"Knowledge Base (Authoritative Facts):\n{kb}\n\n"
-                "Conversation History:"
-            )
+            # Format persona exactly like auto-reply.ts
+            try:
+                persona_data = json.loads(persona_raw)
+                if isinstance(persona_data.get("persona"), dict):
+                    persona = "\n".join(f"- {k.replace('_', ' ')}: {v}" for k, v in persona_data["persona"].items())
+                else:
+                    persona = str(persona_data.get("persona", "none"))
+            except Exception:
+                persona = "none"
+            
+            # Format raw prefix exactly like buildPrompt
+            prompt_parts = [
+                "System Prompt:",
+                clean_system,
+                "",
+                "Persona:",
+                persona,
+                "",
+                "Knowledge Base (Authoritative Facts):",
+                kb,
+                "",
+                "Conversation History:",
+                "none",
+                "",
+                "Current Query:",
+                "Hi",
+                "",
+                "Instruction: Answer the customer's query using only the facts in the Knowledge Base above. Be helpful, polite, and professional.",
+                "",
+                "Assistant:"
+            ]
+            prompt_text = "\n".join(prompt_parts)
+            formatted_prefix = format_chat_prompt(prompt_text)
             
             llm = get_llm()
-            prefix_tokens = llm.tokenize(prefix_text.encode("utf-8"))
-            
-            llm.reset()
-            llm.eval(prefix_tokens)
+            prefix_tokens = llm.tokenize(formatted_prefix.encode("utf-8"))
             
             state_file = STATES_DIR / "global_prefix.state"
             tokens_file = STATES_DIR / "global_prefix.tokens"
             
-            state_file.write_bytes(llm.save_state())
-            with open(tokens_file, "wb") as tf:
-                pickle.dump(prefix_tokens, tf)
+            # Check if valid cache exists
+            cache_valid = False
+            if state_file.exists() and tokens_file.exists():
+                try:
+                    with open(tokens_file, "rb") as tf:
+                        cached_tokens = pickle.load(tf)
+                    if cached_tokens == prefix_tokens:
+                        cache_valid = True
+                except Exception:
+                    cache_valid = False
+            
+            if cache_valid:
+                print(f"[Warmup] Found valid global prefix cache ({len(prefix_tokens)} tokens). Skipping evaluation.", flush=True)
+            else:
+                print(f"[Warmup] Cache invalid or missing. Compiling global prefix cache ({len(prefix_tokens)} tokens)...", flush=True)
+                llm.reset()
+                llm.eval(prefix_tokens)
                 
-            print(f"[Warmup] Ready. Pre-compiled global prefix cache ({len(prefix_tokens)} tokens) saved to disk.", flush=True)
+                with open(state_file, "wb") as sf:
+                    pickle.dump(llm.save_state(), sf)
+                with open(tokens_file, "wb") as tf:
+                    pickle.dump(prefix_tokens, tf)
+                
+                # Push compiled files back to GitHub to avoid recompilation on next boot
+                try:
+                    print("[Warmup] Committing and pushing compiled cache back to GitHub repo...", flush=True)
+                    subprocess.run(["git", "config", "--global", "user.name", "github-actions[bot]"], check=True)
+                    subprocess.run(["git", "config", "--global", "user.email", "41898282+github-actions[bot]@users.noreply.github.com"], check=True)
+                    subprocess.run(["git", "add", str(state_file), str(tokens_file)], check=True)
+                    subprocess.run(["git", "commit", "-m", "chore: cache global prefix KV states [automated]"], check=True)
+                    subprocess.run(["git", "push", "origin", "HEAD:main"], check=True)
+                    print("[Warmup] Global prefix cache successfully pushed to GitHub repository.", flush=True)
+                except Exception as git_err:
+                    print(f"[Warmup] Warning: Failed to push cache to GitHub repo: {git_err}", flush=True)
+            
+            print(f"[Warmup] Warmup phase complete.", flush=True)
         else:
             print("[Warmup] Warning: Warmup files system.md/persona.json/kb.json not found on disk. Performing fallback query...", flush=True)
             warmup_res = run_model_query("Hi")
